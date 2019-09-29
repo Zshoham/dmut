@@ -4,10 +4,11 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #ifdef WIN32
-	#define ann_lock(expr) _Acquires_lock_(expr)
-	#define ann_unlock(expr) _Releases_lock_(expr)
+	#define ann_lock(expr) 
+	#define ann_unlock(expr) 
 #else
 	#define ann_lock(expr)
 	#define ann_unlock(expr)
@@ -18,6 +19,7 @@ enum LOCK_TYPE { WRITER_LOCK, READER_LOCK, NO_LOCK };
 template <typename T>
 class dlock;
 
+
 /**
  * \brief	Data Oriented Mutex, The mutex holds the data and ensures
  *			mutual exclusion in accessing it as apposed to std::mutex
@@ -27,8 +29,25 @@ class dlock;
 template <typename T>
 class dmut
 {
-    T value;
-    std::atomic_int reader_count;
+	template <typename V>
+	struct base_mut_data
+	{
+		V* ptr_data;
+		std::atomic_int reader_count;
+
+		explicit base_mut_data(V* ptr) : ptr_data(ptr), reader_count(0) {}
+		base_mut_data() : ptr_data(nullptr), reader_count(0) {}
+	};
+
+	template <typename V>
+	struct mut_val_data : base_mut_data<V>
+	{
+		V data;
+
+		explicit mut_val_data(V&& data) : base_mut_data<V>(&this->data), data(data) {}
+	};
+
+	base_mut_data<T> *data;
 	
 	// write mutex, ensures that when write access is needed only one thread
 	// can hold a write lock and no read lock can be held.
@@ -47,23 +66,29 @@ class dmut
 	 *			should be called whenever a lock expires.
 	 * \param type the type of the expiring lock.
 	 */
-	void ann_unlock(this->mut_w) on_release(const LOCK_TYPE type)
+	void ann_unlock(this->mut_w) on_release(const LOCK_TYPE type) 
 	{
-		if (type == WRITER_LOCK) this->mut_w.unlock();
+		if (type == WRITER_LOCK)
+		{
+			this->mut_w.unlock();
+			std::cout << "releasing writer\n";
+		}
 
 		if (type == READER_LOCK)
 		{
 			this->mut_r.lock();
-			--reader_count;
-			if (reader_count == 0) this->mut_w.unlock();
+			--data->reader_count;
+			if (data->reader_count == 0) this->mut_w.unlock();
 			this->mut_r.unlock();
+			std::cout << "releasing reader\n";
 		}
 	}
 
 public:
 
-    explicit dmut(T&& value) : reader_count(0) { this->value = std::move(value); }
-    explicit dmut(T& value) : reader_count(0) { this->value = std::move(value); }
+	explicit dmut(T&& value) : data(new mut_val_data<T>(std::move(value))) {}
+    explicit dmut(T& value) : data(new mut_val_data<T>(std::move(value))) {}
+	explicit dmut(T *value_ptr) : data(new base_mut_data<T>(value_ptr)) {}
     dmut() = default;
     dmut(const dmut& other) = delete;
 
@@ -77,8 +102,8 @@ public:
     {
         this->mut_w.lock();
         other.mut_w.lock();
-        this->value = std::move(other.value);
-        this->reader_count = 0;
+        this->data->ptr_data = std::move(other.data->ptr_data);
+        this->data->reader_count = 0;
         other.mut_w.unlock();
         this->mut_w.lock();
     }
@@ -102,8 +127,8 @@ public:
 	{
 		this->mut_w.lock();
 		other.mut_w.lock();
-		this->value = std::move(other.value);
-		this->reader_count = 0;
+		this->data->ptr_data = std::move(other.data->ptr_data);
+		this->data->reader_count = 0;
 		other.mut_w.unlock();
 		this->mut_w.unlock();
 
@@ -121,8 +146,10 @@ public:
      */
     dlock<T> ann_lock(this->mut_w) lock()
     {
+		std::cout << "acquiring writer\n";
 		this->mut_w.lock();
-		return dlock<T>(&value, this, WRITER_LOCK);
+		std::cout << "acquired writer\n";
+		return dlock<T>(data->ptr_data, this, WRITER_LOCK);
 	}
 	
     /**
@@ -136,9 +163,9 @@ public:
 	std::pair<bool, dlock<T>> ann_lock(this->mut_w) try_lock()
 	{
 		if (this->mut_w.try_lock)
-			return std::make_pair(true, dlock<T>(&value, this, WRITER_LOCK));
+			return std::make_pair(true, dlock<T>(data->ptr_data, this, WRITER_LOCK));
 
-		return std::make_pair(false, dlock<T>());
+		return std::make_pair(false, dlock<T>()); 
 	}
 
 
@@ -151,11 +178,13 @@ public:
 	 */
 	dlock<const T> ann_lock(this->mut_w) peek()
 	{
+		std::cout << "acquiring reader\n";
 		this->mut_r.lock();
-		++reader_count;
-		if (reader_count == 1) this->mut_w.lock();
+		++data->reader_count;
+		if (data->reader_count == 1) this->mut_w.lock();
 		this->mut_r.unlock();
-		return dlock<const T>(&value, this, READER_LOCK);
+		std::cout << "acquired reader\n";
+		return dlock<const T>(data->ptr_data, this, READER_LOCK);
 	}
 
     /**
@@ -174,18 +203,18 @@ public:
 		//will unlock the readers mutex whenever the method returns.
 		std::lock_guard<std::mutex>(this->mut_r);
 		
-		++reader_count;
-		if (reader_count == 1)
+		++data->reader_count;
+		if (data->reader_count == 1)
 		{
 			if (this->mut_w.try_lock())
-				return std::make_pair(true, dlock<const T>(&value, this, READER_LOCK));
+				return std::make_pair(true, dlock<const T>(value_ptr, this, READER_LOCK));
 			
 
-			--reader_count;
+			--data->reader_count;
 			return std::make_pair(false, dlock<const T>());
 		}
 		
-		return std::make_pair(true, dlock<const T>(&value, this, READER_LOCK));
+		return std::make_pair(true, dlock<const T>(value_ptr, this, READER_LOCK));
 	}
 };
 
@@ -193,6 +222,12 @@ template <typename T, typename ...U>
 dmut<T> make_dmut(U&& ...args)
 {
 	return dmut<T>(T(std::forward<U>(args)...));
+}
+
+template<typename T, typename ...U>
+dmut<T> new_dmut(U&& ...args)
+{
+	return dmut<T>(new T(std::forward<U>(args)...));
 }
 
 /**
@@ -207,36 +242,39 @@ dmut<T> make_dmut(U&& ...args)
  * \tparam T The type of data the lock refers to.
  */
 template <typename T>
-class dlock : public std::unique_ptr<T>
+class dlock : std::unique_ptr<T>
 {
 	// when making a readers lock the type of the dlock should
 	// be const T, but the type of the owner remains T,
-	// remove_const to make mut_type always T .
+	// remove_const to make mut_type always T.
 	typedef typename std::remove_const<T>::type mut_type;
 	
 	LOCK_TYPE type;
-	dmut<mut_type>* owner;
-
-	void release() { std::unique_ptr<T>::release(); }
-	void reset() { std::unique_ptr<T>::reset(); }
+	dmut<mut_type> *owner;
 
 public:
-	dlock(T* ptr, dmut<mut_type>* owner, LOCK_TYPE type) : std::unique_ptr<T>(ptr), type(type), owner(owner) {}
+	dlock(T *ptr, dmut<mut_type> *owner, LOCK_TYPE type) : std::unique_ptr<T>(ptr), type(type), owner(owner) {}
 	dlock(dlock&& other) noexcept : std::unique_ptr<T>(other), type(other.type), owner(other.owner) {}
 	dlock(const dlock& other) = delete;
 
 	dlock& operator=(const dlock& other) = delete;
 	dlock& operator=(dlock&& other) noexcept
 	{
-		*this = std::unique_ptr<T>(other);
+		std::unique_ptr<T>::operator=(std::move(other));
 		this->owner = other.owner;
 		other.owner = nullptr;
 		this->type = type;
+		other.type = NO_LOCK;
 
 		return *this;
 	}
 
-	~dlock()
+	~dlock() { unlock(); }
+	
+	T& operator*() const { return std::unique_ptr<T>::operator*(); }
+	T* operator->() const noexcept { return std::unique_ptr<T>::operator->(); }
+
+	void unlock() noexcept
 	{
 		// the unique_ptr is being released without being deleted because
 		// the data is still held by the owner, and it is stack allocated
@@ -247,6 +285,7 @@ public:
 		this->owner = nullptr;
 		this->type = NO_LOCK;
 	}
+	
 };
 
 #endif
