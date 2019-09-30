@@ -1,10 +1,23 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <array>
 #include "dmut.h"
 
-dmut<std::vector<int>> val = make_dmut<std::vector<int>>(std::vector<int>());
+struct iwrap
+{
+	int val;
 
+	explicit iwrap(const int val)
+	{
+		this->val = val;
+		std::cout << "constructing iwrap\n";
+	}
+
+	
+};
+
+dmut<iwrap> val = new_dmut<iwrap>(5);
 
 void print()
 {
@@ -12,26 +25,32 @@ void print()
 
 	std::this_thread::sleep_for(std::chrono::seconds(1));
 	
-	std::cout << "printing val: " << lock->front() << "\n";
+	std::cout << "printing val: " << lock->val << "\n";
 }
 
 void change(int new_val)
 {
 	const auto lock = val.lock();
 
-	lock->push_back(5);
 	
 	std::this_thread::sleep_for(std::chrono::seconds(5));
 	
-	std::cout << "setting value to: " << lock->front() << "\n";
+	std::cout << "setting value to: " << lock->val << "\n";
+}
+
+template<typename T> std::shared_ptr<T> make_shared_array(size_t size)
+{
+	return std::shared_ptr<T>(new T[size], std::default_delete<T[]>());
 }
 
 
 int main()
-{
-	auto lock = val.lock();
-	lock->push_back(1);
-	lock.unlock();
+{	
+	//dmut<std::array<int, 10>> mut = make_dmut<std::array<int, 10>>();
+	
+	// auto lock = val.lock();
+	// lock->push_back(1);
+	// lock.unlock();
 	std::thread t2(change, 5);
 	std::thread t1(print);
 	

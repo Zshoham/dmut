@@ -7,11 +7,11 @@
 #include <optional>
 
 #ifdef WIN32
-	#define ann_lock(expr) 
-	#define ann_unlock(expr) 
+	#define ann_lock(expr)		_Acquires_lock_(expr)
+	#define ann_unlock(expr)	_Releases_lock_(expr)
 #else
 	#define ann_lock(expr)
-	#define ann_unlock(expr)
+	#define ann_unlock(expr) 
 #endif
 
 enum LOCK_TYPE { WRITER_LOCK, READER_LOCK, NO_LOCK };
@@ -24,6 +24,23 @@ class dlock;
  * \brief	Data Oriented Mutex, The mutex holds the data and ensures
  *			mutual exclusion in accessing it as apposed to std::mutex
  *			which ensures mutual exclusion of code segments.
+ *			this mutex behaves more like a std::shared_mutex since
+ *			a readers lock (shared lock) can be acquired as well as
+ *			a writers lock (exclusive lock).
+ *
+ *			*	to acquire a writers lock use the lock() method,
+ *				use try_lock() if you wish for the method to return
+ *				upon failure.
+ *
+ *			*	to acquire a readers lock use the peek() method,
+ *				use try_peek() if you wish for the method to return
+ *				upon failure.
+ *
+ *			both methods return a dlock objects which acts as a unique_ptr
+ *			to the data, once the dlock is destroyed
+ *			(by going out of scope or using the unlock() method)
+ *			the lock is released and can be acquired by others.
+ *			
  * \tparam T The type of data that the mutex guards.
  */
 template <typename T>
@@ -32,11 +49,19 @@ class dmut
 	template <typename V>
 	struct base_mut_data
 	{
-		V* ptr_data;
+		V *ptr_data;
 		std::atomic_int reader_count;
 
 		explicit base_mut_data(V* ptr) : ptr_data(ptr), reader_count(0) {}
 		base_mut_data() : ptr_data(nullptr), reader_count(0) {}
+		base_mut_data(const base_mut_data& other) = delete;
+		base_mut_data(base_mut_data&& other) = delete;
+		virtual ~base_mut_data() = default;
+
+		base_mut_data& operator=(const base_mut_data& other) = delete;
+		base_mut_data& operator=(base_mut_data&& other) = delete;
+
+		virtual void clean() noexcept { delete this->ptr_data; }
 	};
 
 	template <typename V>
@@ -45,6 +70,14 @@ class dmut
 		V data;
 
 		explicit mut_val_data(V&& data) : base_mut_data<V>(&this->data), data(data) {}
+		mut_val_data(const mut_val_data& other) = delete;
+		mut_val_data(mut_val_data&& other) = delete;
+		virtual ~mut_val_data() = default;
+
+		mut_val_data& operator=(const mut_val_data& other) = delete;
+		mut_val_data& operator=(mut_val_data&& other) = delete;
+		
+		void clean() noexcept override {}
 	};
 
 	base_mut_data<T> *data;
@@ -64,23 +97,20 @@ class dmut
     /**
 	 * \brief	callback for releasing locks on this dmut.
 	 *			should be called whenever a lock expires.
-	 * \param type the type of the expiring lock.
+	 * \param	type the type of the expiring lock.
 	 */
 	void ann_unlock(this->mut_w) on_release(const LOCK_TYPE type) 
 	{
-		if (type == WRITER_LOCK)
-		{
-			this->mut_w.unlock();
-			std::cout << "releasing writer\n";
-		}
+		if (type == WRITER_LOCK) this->mut_w.unlock();
+		
 
 		if (type == READER_LOCK)
 		{
-			this->mut_r.lock();
+			//will unlock at the end of the if statement.
+			std::lock_guard<std::mutex>(this->mut_r);
+			
 			--data->reader_count;
 			if (data->reader_count == 0) this->mut_w.unlock();
-			this->mut_r.unlock();
-			std::cout << "releasing reader\n";
 		}
 	}
 
@@ -100,18 +130,21 @@ public:
 	 */
     dmut(dmut&& other) noexcept
     {
-        this->mut_w.lock();
-        other.mut_w.lock();
-        this->data->ptr_data = std::move(other.data->ptr_data);
-        this->data->reader_count = 0;
-        other.mut_w.unlock();
-        this->mut_w.lock();
+		//both mutexes will unlock when the methods returns.
+		std::lock_guard<std::mutex>(this->mut_w);
+		std::lock_guard<std::mutex>(other.mut_w);
+
+		this->data = other.data;
+		other.data = nullptr;
     }
 
     ~dmut() 
     {
-        this->mut_w.lock();
-        this->mut_w.unlock();
+    	// this will ensure that the mutex cannot be destroyed while
+    	// someone holds a lock on its data.
+		std::lock_guard<std::mutex>(this->mut_w);
+		data->clean();
+		delete data;
     }
 
 	dmut& operator=(const dmut& other) = delete;
@@ -121,17 +154,17 @@ public:
 	 *			note: this operation requires a writers lock on both dmuts,
 	 *			thus the method may block for a long time if both dmuts are active.
 	 * \param	other the dmut being moved into this one.
-	 * \return a reference to this dmut.
+	 * \return	a reference to this dmut.
 	 */
 	dmut& operator=(dmut&& other) noexcept
 	{
-		this->mut_w.lock();
-		other.mut_w.lock();
-		this->data->ptr_data = std::move(other.data->ptr_data);
-		this->data->reader_count = 0;
-		other.mut_w.unlock();
-		this->mut_w.unlock();
-
+		//both mutexes will unlock when the methods returns.
+		std::lock_guard<std::mutex>(this->mut_w);
+		std::lock_guard<std::mutex>(other.mut_w);
+		
+		this->data = other.data;
+		other.data = nullptr;
+		
 		return *this;
 	}
 
@@ -146,9 +179,7 @@ public:
      */
     dlock<T> ann_lock(this->mut_w) lock()
     {
-		std::cout << "acquiring writer\n";
 		this->mut_w.lock();
-		std::cout << "acquired writer\n";
 		return dlock<T>(data->ptr_data, this, WRITER_LOCK);
 	}
 	
@@ -178,12 +209,11 @@ public:
 	 */
 	dlock<const T> ann_lock(this->mut_w) peek()
 	{
-		std::cout << "acquiring reader\n";
-		this->mut_r.lock();
+		//will unlock the readers mutex whenever the method returns.
+		std::lock_guard<std::mutex>(this->mut_r);
+		
 		++data->reader_count;
 		if (data->reader_count == 1) this->mut_w.lock();
-		this->mut_r.unlock();
-		std::cout << "acquired reader\n";
 		return dlock<const T>(data->ptr_data, this, READER_LOCK);
 	}
 
@@ -207,23 +237,37 @@ public:
 		if (data->reader_count == 1)
 		{
 			if (this->mut_w.try_lock())
-				return std::make_pair(true, dlock<const T>(value_ptr, this, READER_LOCK));
+				return std::make_pair(true, dlock<const T>(data->ptr_data, this, READER_LOCK));
 			
 
 			--data->reader_count;
 			return std::make_pair(false, dlock<const T>());
 		}
 		
-		return std::make_pair(true, dlock<const T>(value_ptr, this, READER_LOCK));
+		return std::make_pair(true, dlock<const T>(data->ptr_data, this, READER_LOCK));
 	}
 };
 
+/**
+ * \brief Creates a dmut, allocating the data it guards on the stack.
+ * \tparam T the type of data the mutex should guard.
+ * \tparam U the parameter types required to construct the object.
+ * \param args the parameters required to construct the object.
+ * \return a dmut containing the newly constructed object of type T.
+ */
 template <typename T, typename ...U>
 dmut<T> make_dmut(U&& ...args)
 {
 	return dmut<T>(T(std::forward<U>(args)...));
 }
 
+/**
+ * \brief Creates a dmut, allocating the data it guards on the heap.
+ * \tparam T the type of data the mutex should guard.
+ * \tparam U the parameter types required to construct the object.
+ * \param args the parameters required to construct the object.
+ * \return a dmut containing the newly constructed object of type T.
+ */
 template<typename T, typename ...U>
 dmut<T> new_dmut(U&& ...args)
 {
@@ -254,7 +298,7 @@ class dlock : std::unique_ptr<T>
 
 public:
 	dlock(T *ptr, dmut<mut_type> *owner, LOCK_TYPE type) : std::unique_ptr<T>(ptr), type(type), owner(owner) {}
-	dlock(dlock&& other) noexcept : std::unique_ptr<T>(other), type(other.type), owner(other.owner) {}
+	dlock(dlock&& other) noexcept : std::unique_ptr<T>(std::move(other)), type(other.type), owner(other.owner) {}
 	dlock(const dlock& other) = delete;
 
 	dlock& operator=(const dlock& other) = delete;
@@ -274,6 +318,11 @@ public:
 	T& operator*() const { return std::unique_ptr<T>::operator*(); }
 	T* operator->() const noexcept { return std::unique_ptr<T>::operator->(); }
 
+	/**
+	 * \brief	releases the lock to the data rendering this object useless,
+	 *			has a similar effect to std::unique_ptr::reset() or setting a
+	 *			pointer to nullptr.
+	 */
 	void unlock() noexcept
 	{
 		// the unique_ptr is being released without being deleted because
