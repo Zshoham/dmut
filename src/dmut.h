@@ -36,23 +36,60 @@ class dlock;
  *				use try_peek() if you wish for the method to return
  *				upon failure.
  *
- *			both methods return a dlock objects which acts as a unique_ptr
+ *			both operations return a dlock objects which acts as a unique_ptr
  *			to the data, once the dlock is destroyed
  *			(by going out of scope or using the unlock() method)
  *			the lock is released and can be acquired by others.
+ *
+ *			notes:
+ *
+ *			*	it is recommended to use the make_dmut and new_dmut functions
+ *				in order to construct a dmut, but the constructors are available
+ *				and are better to use when for example the data the mutex should
+ *				protect has already been constructed.
+ *				
+ *			*	creating a dmut with type T[] is impossible, this is both a pain
+ *				to implement and should probably not be used, if you wish to create
+ *				a mutex that protects an array that is not dynamically allocated then
+ *				use std::array or some other safe wrapper.
  *			
  * \tparam T The type of data that the mutex guards.
  */
 template <typename T>
 class dmut
 {
+
+	/*
+	 *	These structs hold the data of the dmut.
+	 *	The structs are used instead of just having private
+	 *	members in order to make the ability to have the mutexes data
+	 *	be constructed on the stack or on the heap at the users will.
+	 *	The base_mut_data holds a pointer to the data and the reader_count
+	 *	this is all that is required for the dmut to operate, but how is the
+	 *	pointer acquired ?
+	 *	if the data is created on the heap, there is no problem we create
+	 *	an instance of base_mut_data and provide it with the pointer to the heap.
+	 *	but if the data is created on the stack we create a mut_val_data which holds
+	 *	the stack allocated data and sets the base_mut_data's pointer to point to
+	 *	the stack allocated data.
+	 *	A dmut holds a pointer to base_mut_data which means it can point to both
+	 *	objects since mut_val_data inherits base_mut_data.
+	 *	This way we can use the pointer in base_mut_data without caring if it points to
+	 *	the stack or the heap, of course if it points to the heap it needs to be freed
+	 *	and if it points to the stack it must not be freed, hence there is a clean method
+	 *	in both structs, if the pointer dmut holds points to a base_mut_data the clean method
+	 *	will delete the pointer, otherwise it will do nothing since the pointer is
+	 *	pointing to a stack allocated object which must not be deleted and will get cleaned
+	 *	up automatically.
+	 */
+	
 	template <typename V>
 	struct base_mut_data
 	{
 		V *ptr_data;
 		std::atomic_int reader_count;
 
-		explicit base_mut_data(V* ptr) : ptr_data(ptr), reader_count(0) {}
+		explicit base_mut_data(V *ptr) : ptr_data(ptr), reader_count(0) {}
 		base_mut_data() : ptr_data(nullptr), reader_count(0) {}
 		base_mut_data(const base_mut_data& other) = delete;
 		base_mut_data(base_mut_data&& other) = delete;
@@ -65,7 +102,7 @@ class dmut
 	};
 
 	template <typename V>
-	struct mut_val_data : base_mut_data<V>
+	struct mut_val_data final : base_mut_data<V>
 	{
 		V data;
 
