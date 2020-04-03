@@ -46,11 +46,11 @@ template<typename T> std::shared_ptr<T> make_shared_array(size_t size)
 
 int main()
 {	
-	//dmut<std::array<int, 10>> mut = make_dmut<std::array<int, 10>>();
+	dmut<int[]> mut = make_dmut<int[]>();
 	
-	// auto lock = val.lock();
-	// lock->push_back(1);
-	// lock.unlock();
+	auto lock = mut.lock();
+	lock[5] = 6;
+	lock.unlock();
 	std::thread t2(change, 5);
 	std::thread t1(print);
 	

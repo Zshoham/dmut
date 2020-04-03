@@ -6,14 +6,6 @@
 #include <mutex>
 #include <optional>
 
-#ifdef WIN32
-	#define ann_lock(expr)		_Acquires_lock_(expr)
-	#define ann_unlock(expr)	_Releases_lock_(expr)
-#else
-	#define ann_lock(expr)
-	#define ann_unlock(expr) 
-#endif
-
 enum LOCK_TYPE { WRITER_LOCK, READER_LOCK, NO_LOCK };
 
 template <typename T>
@@ -62,7 +54,7 @@ class dmut
 	/*
 	 *	These structs hold the data of the dmut.
 	 *	The structs are used instead of just having private
-	 *	members in order to make the ability to have the mutexes data
+	 *	members in order to have the mutexes data
 	 *	be constructed on the stack or on the heap at the users will.
 	 *	The base_mut_data holds a pointer to the data and the reader_count
 	 *	this is all that is required for the dmut to operate, but how is the
@@ -136,7 +128,7 @@ class dmut
 	 *			should be called whenever a lock expires.
 	 * \param	type the type of the expiring lock.
 	 */
-	void ann_unlock(this->mut_w) on_release(const LOCK_TYPE type) 
+	void on_release(const LOCK_TYPE type) 
 	{
 		if (type == WRITER_LOCK) this->mut_w.unlock();
 		
@@ -144,7 +136,7 @@ class dmut
 		if (type == READER_LOCK)
 		{
 			//will unlock at the end of the if statement.
-			std::lock_guard<std::mutex>(this->mut_r);
+			std::lock_guard<std::mutex> guard(this->mut_r);
 			
 			--data->reader_count;
 			if (data->reader_count == 0) this->mut_w.unlock();
@@ -168,8 +160,8 @@ public:
     dmut(dmut&& other) noexcept
     {
 		//both mutexes will unlock when the methods returns.
-		std::lock_guard<std::mutex>(this->mut_w);
-		std::lock_guard<std::mutex>(other.mut_w);
+		std::lock_guard<std::mutex> this_guard(this->mut_w);
+		std::lock_guard<std::mutex> other_guard(other.mut_w);
 
 		this->data = other.data;
 		other.data = nullptr;
@@ -179,7 +171,7 @@ public:
     {
     	// this will ensure that the mutex cannot be destroyed while
     	// someone holds a lock on its data.
-		std::lock_guard<std::mutex>(this->mut_w);
+		std::lock_guard<std::mutex> guard(this->mut_w);
 		data->clean();
 		delete data;
     }
@@ -196,8 +188,8 @@ public:
 	dmut& operator=(dmut&& other) noexcept
 	{
 		//both mutexes will unlock when the methods returns.
-		std::lock_guard<std::mutex>(this->mut_w);
-		std::lock_guard<std::mutex>(other.mut_w);
+		std::lock_guard<std::mutex> this_guard(this->mut_w);
+		std::lock_guard<std::mutex> other_guard(other.mut_w);
 		
 		this->data = other.data;
 		other.data = nullptr;
@@ -214,7 +206,7 @@ public:
      * \return the lock on the data with ability to read and write to the underlying memory.
      * 
      */
-    dlock<T> ann_lock(this->mut_w) lock()
+    dlock<T> lock()
     {
 		this->mut_w.lock();
 		return dlock<T>(data->ptr_data, this, WRITER_LOCK);
@@ -228,9 +220,9 @@ public:
 	 *			the lock was acquired and the dlock is the lock itself.
 	 *			in case the lock is not acquired a dlock pointing to null will be returned.
 	 */
-	std::pair<bool, dlock<T>> ann_lock(this->mut_w) try_lock()
+	std::pair<bool, dlock<T>> try_lock()
 	{
-		if (this->mut_w.try_lock)
+		if (this->mut_w.try_lock())
 			return std::make_pair(true, dlock<T>(data->ptr_data, this, WRITER_LOCK));
 
 		return std::make_pair(false, dlock<T>()); 
@@ -244,10 +236,10 @@ public:
 	 *			for non blocking requests see 'try_peek'.
 	 * \return the lock on the data as const, meaning the data can only be read.
 	 */
-	dlock<const T> ann_lock(this->mut_w) peek()
+	dlock<const T> peek()
 	{
 		//will unlock the readers mutex whenever the method returns.
-		std::lock_guard<std::mutex>(this->mut_r);
+		std::lock_guard<std::mutex> guard(this->mut_r);
 		
 		++data->reader_count;
 		if (data->reader_count == 1) this->mut_w.lock();
@@ -265,10 +257,10 @@ public:
 	 *			was acquired and the dlock is the lock itself.
 	 *			in case the lock cannot be acquired a dlock pointing to null will re returned.
 	 */
-	std::pair<bool, dlock<T>> ann_lock(this->mut_w) try_peek()
+	std::pair<bool, dlock<T>> try_peek()
 	{
 		//will unlock the readers mutex whenever the method returns.
-		std::lock_guard<std::mutex>(this->mut_r);
+		std::lock_guard<std::mutex> guard(this->mut_r);
 		
 		++data->reader_count;
 		if (data->reader_count == 1)
@@ -334,7 +326,7 @@ class dlock : std::unique_ptr<T>
 	dmut<mut_type> *owner;
 
 public:
-	dlock(T *ptr, dmut<mut_type> *owner, LOCK_TYPE type) : std::unique_ptr<T>(ptr), type(type), owner(owner) {}
+	dlock(T *ptr, dmut<mut_type> *owner, const LOCK_TYPE type) : std::unique_ptr<T>(ptr), type(type), owner(owner) {}
 	dlock(dlock&& other) noexcept : std::unique_ptr<T>(std::move(other)), type(other.type), owner(other.owner) {}
 	dlock(const dlock& other) = delete;
 
@@ -363,15 +355,17 @@ public:
 	void unlock() noexcept
 	{
 		// the unique_ptr is being released without being deleted because
-		// the data is still held by the owner, and it is stack allocated
+		// the data is still held by the owner, and it might even be stack allocated
 		// and as such will cause an exception if the unique_ptr destructor
 		// will try to delete it.
-		this->release();
+		this->release();  // NOLINT(bugprone-unused-return-value)
 		owner->on_release(type);
 		this->owner = nullptr;
 		this->type = NO_LOCK;
 	}
 	
 };
+
+
 
 #endif
