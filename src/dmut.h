@@ -152,7 +152,7 @@ public:
     dmut(const dmut& other) = delete;
 
 	/**
-	 * \brief	constructs a dmut by moving some dmute into a new one.
+	 * \brief	constructs a dmut by moving some dmut into a new one.
 	 *			note: this constructor requires a writers lock on the
 	 *			dmut being moved.
 	 * \param	other the dmut being moved.
@@ -179,7 +179,7 @@ public:
 	dmut& operator=(const dmut& other) = delete;
 
     /**
-	 * \brief	moves some dmute into this one.
+	 * \brief	moves some dmut into this one.
 	 *			note: this operation requires a writers lock on both dmuts,
 	 *			thus the method may block for a long time if both dmuts are active.
 	 * \param	other the dmut being moved into this one.

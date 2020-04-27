@@ -1,67 +1,67 @@
 #include <iostream>
 #include <thread>
 #include <vector>
-#include <array>
+#include <random>
+#include <algorithm>
+#include <fstream>
+#include <string>
+#include <sstream>
 #include "dmut.h"
 
-struct iwrap
+#define VEC_SIZE 100000000
+#define ITERATIONS 10000000
+
+void read(dmut<std::vector<int>> &data)
 {
-	int val;
+    std::mt19937 rng((std::random_device()()));
+    std::uniform_int_distribution<std::mt19937::result_type> picker(0, ITERATIONS - 1);
 
-	explicit iwrap(const int val)
-	{
-		this->val = val;
-		std::cout << "constructing iwrap\n";
-	}
+    std::ostringstream ss;
+    ss << std::this_thread::get_id();
 
-	
-};
+    std::ofstream stream(ss.str(), std::ios::binary);
 
-dmut<iwrap> val = new_dmut<iwrap>(5);
-
-void print()
-{
-	const auto lock = val.peek();
-
-	std::this_thread::sleep_for(std::chrono::seconds(1));
-	
-	std::cout << "printing val: " << lock->val << "\n";
+    auto ptr = data.peek();
+    for (int i = 0; i < ITERATIONS; ++i) {
+        stream.put((char) ptr->at(picker(rng)));
+    }
 }
 
-void change(int new_val)
-{
-	const auto lock = val.lock();
+void transform(dmut<std::vector<int>> &data) {
+    std::mt19937 rng((std::random_device()()));
+    std::uniform_int_distribution<std::mt19937::result_type> picker(0, ITERATIONS - 1);
 
-	
-	std::this_thread::sleep_for(std::chrono::seconds(5));
-	
-	std::cout << "setting value to: " << lock->val << "\n";
-}
-
-template<typename T> std::shared_ptr<T> make_shared_array(size_t size)
-{
-	return std::shared_ptr<T>(new T[size], std::default_delete<T[]>());
+    auto ptr = data.lock();
+    for (int i = 0; i < ITERATIONS; ++i) {
+        ptr->at(picker(rng)) = picker(rng);
+    }
 }
 
 
 int main()
-{	
-	dmut<int[]> mut = make_dmut<int[]>();
-	
-	auto lock = mut.lock();
-	lock[5] = 6;
-	lock.unlock();
-	std::thread t2(change, 5);
-	std::thread t1(print);
-	
-	std::this_thread::sleep_for(std::chrono::seconds(5));
+{
+    std::mt19937 rng((std::random_device()()));
 
-	std::cout << "done waiting \n";
+    std::uniform_int_distribution<std::mt19937::result_type> generator(INT32_MIN, INT32_MAX);
 
-	
-	t1.join();
-	t2.join();
-	
-	
+    dmut<std::vector<int>> data = make_dmut<std::vector<int>>(VEC_SIZE);
+
+    auto ptr = data.lock();
+
+    std::generate(ptr->begin(), ptr->end(), [&generator, &rng, &ptr] { return generator(rng); });
+
+    ptr.unlock();
+
+    std::thread reader1(read, std::ref(data));
+    std::thread reader2(read, std::ref(data));
+
+    std::thread transformer1(transform, std::ref(data));
+    std::thread transformer2(transform, std::ref(data));
+
+    reader1.join();
+    reader2.join();
+    transformer1.join();
+    transformer2.join();
+
 	return 0;
 }
